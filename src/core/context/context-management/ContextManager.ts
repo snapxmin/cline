@@ -261,10 +261,12 @@ export class ContextManager {
 			// Calculate the range of messages to compress
 			const startIndex = currentDeletedRange ? currentDeletedRange[1] + 1 : 2 // Start after the first user-assistant pair
 			const preserveCount = this.semanticCompressionService.getPreserveRecentMessages() * 2 // Each pair is 2 messages
-			const endIndex = Math.max(startIndex, apiMessages.length - preserveCount)
+			// Calculate endIndex: we want to compress up to (but not including) the preserved recent messages
+			// Use Math.min to ensure endIndex doesn't exceed the message array bounds
+			const endIndex = Math.min(apiMessages.length, Math.max(startIndex, apiMessages.length - preserveCount))
 
-			// Need at least some messages to compress
-			if (endIndex <= startIndex) {
+			// Need at least some messages to compress (more than just a single message pair)
+			if (endIndex <= startIndex + 2) {
 				return { success: false }
 			}
 
@@ -279,7 +281,8 @@ export class ContextManager {
 			this.applySemanticCompressionNoticeChange(timestamp, summary)
 
 			// Calculate the new deleted range
-			const newDeletedRange: [number, number] = [2, endIndex - 1] // Keep first user-assistant pair (indices 0, 1)
+			// Keep first user-assistant pair (indices 0, 1), and delete from index 2 up to endIndex-1
+			const newDeletedRange: [number, number] = [2, endIndex - 1]
 
 			return {
 				success: true,

@@ -59,13 +59,47 @@ describe("SemanticCompressionService", () => {
 				apiProvider: "openai-native",
 				modelId: "gpt-4o-mini",
 			}
+			// Using a generic configuration that satisfies the requirement
+			// that apiConfiguration is not undefined
 			const apiConfig = {
-				apiProvider: "anthropic" as const,
+				apiProvider: "openai-native" as const,
 				openAiNativeApiKey: "test-key",
 			}
 			const service = new SemanticCompressionService(settings, apiConfig)
 
 			expect(service.isEnabled()).to.equal(true)
+		})
+
+		it("should return false when modelId is empty string", () => {
+			const settings: SemanticCompressionSettings = {
+				...DEFAULT_SEMANTIC_COMPRESSION_SETTINGS,
+				enabled: true,
+				apiProvider: "openai-native",
+				modelId: "",
+			}
+			const apiConfig = {
+				apiProvider: "openai-native" as const,
+				openAiNativeApiKey: "test-key",
+			}
+			const service = new SemanticCompressionService(settings, apiConfig)
+
+			expect(service.isEnabled()).to.equal(false)
+		})
+
+		it("should return false when modelId is whitespace only", () => {
+			const settings: SemanticCompressionSettings = {
+				...DEFAULT_SEMANTIC_COMPRESSION_SETTINGS,
+				enabled: true,
+				apiProvider: "openai-native",
+				modelId: "   ",
+			}
+			const apiConfig = {
+				apiProvider: "openai-native" as const,
+				openAiNativeApiKey: "test-key",
+			}
+			const service = new SemanticCompressionService(settings, apiConfig)
+
+			expect(service.isEnabled()).to.equal(false)
 		})
 	})
 

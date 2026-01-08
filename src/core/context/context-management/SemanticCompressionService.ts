@@ -1,7 +1,7 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import { ApiConfiguration, ApiProvider } from "@shared/api"
 import { SemanticCompressionSettings } from "@shared/SemanticCompressionSettings"
-import { buildApiHandler, ApiHandler, SingleCompletionHandler } from "@api/index"
+import { buildApiHandler, ApiHandler } from "@api/index"
 
 /**
  * Prompt template for semantic compression
@@ -63,6 +63,7 @@ export class SemanticCompressionService {
 			this.settings.enabled &&
 			this.settings.apiProvider !== undefined &&
 			this.settings.modelId !== undefined &&
+			this.settings.modelId.trim() !== "" &&
 			this.apiConfiguration !== undefined
 		)
 	}
