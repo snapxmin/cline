@@ -62,7 +62,8 @@
 					"exploring-clines-tools/checkpoints",
 					"exploring-clines-tools/new-task-tool",
 					"exploring-clines-tools/remote-browser-support",
-					"exploring-clines-tools/slash-commands"
+					"exploring-clines-tools/slash-commands",
+					"exploring-clines-tools/cline-workflow"
 				]
 			}
 		]
