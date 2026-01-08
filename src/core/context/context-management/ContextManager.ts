@@ -8,6 +8,9 @@ import cloneDeep from "clone-deep"
 import { ClineApiReqInfo, ClineMessage } from "@shared/ExtensionMessage"
 import { ApiHandler } from "@api/index"
 import { Anthropic } from "@anthropic-ai/sdk"
+import { SemanticCompressionService } from "./SemanticCompressionService"
+import { SemanticCompressionSettings, DEFAULT_SEMANTIC_COMPRESSION_SETTINGS } from "@shared/SemanticCompressionSettings"
+import { ApiConfiguration } from "@shared/api"
 
 enum EditType {
 	UNDEFINED = 0,
@@ -51,8 +54,32 @@ export class ContextManager {
 	// the above example would be how we update the first assistant message to indicate we truncated text
 	private contextHistoryUpdates: Map<number, [number, Map<number, ContextUpdate[]>]>
 
+	// Semantic compression service for automatic context compression
+	private semanticCompressionService: SemanticCompressionService
+	private semanticCompressionSettings: SemanticCompressionSettings
+
 	constructor() {
 		this.contextHistoryUpdates = new Map()
+		this.semanticCompressionSettings = DEFAULT_SEMANTIC_COMPRESSION_SETTINGS
+		this.semanticCompressionService = new SemanticCompressionService(this.semanticCompressionSettings)
+	}
+
+	/**
+	 * Updates the semantic compression settings
+	 */
+	updateSemanticCompressionSettings(settings: SemanticCompressionSettings, apiConfiguration?: ApiConfiguration) {
+		this.semanticCompressionSettings = settings
+		this.semanticCompressionService.updateSettings(settings)
+		if (apiConfiguration) {
+			this.semanticCompressionService.updateApiConfiguration(apiConfiguration)
+		}
+	}
+
+	/**
+	 * Updates the API configuration for semantic compression
+	 */
+	updateSemanticCompressionApiConfig(apiConfiguration: ApiConfiguration) {
+		this.semanticCompressionService.updateApiConfiguration(apiConfiguration)
 	}
 
 	/**
@@ -117,6 +144,8 @@ export class ContextManager {
 		taskDirectory: string,
 	) {
 		let updatedConversationHistoryDeletedRange = false
+		let semanticCompressionApplied = false
+		let compressedSummary: string | undefined
 
 		// If the previous API request's total token usage is close to the context window, truncate the conversation history to free up space for the new request
 		if (previousApiReqIndex >= 0) {
@@ -125,10 +154,36 @@ export class ContextManager {
 				const timestamp = previousRequest.ts
 				const { tokensIn, tokensOut, cacheWrites, cacheReads }: ClineApiReqInfo = JSON.parse(previousRequest.text)
 				const totalTokens = (tokensIn || 0) + (tokensOut || 0) + (cacheWrites || 0) + (cacheReads || 0)
-				const { maxAllowedSize } = getContextWindowInfo(api)
+				const { maxAllowedSize, contextWindow } = getContextWindowInfo(api)
+
+				// Check if semantic compression should be triggered
+				// Use a threshold based on context window usage (e.g., 80% by default)
+				const compressionThreshold = contextWindow * this.semanticCompressionService.getTriggerThresholdDecimal()
+				const shouldTriggerCompression =
+					this.semanticCompressionService.isEnabled() &&
+					totalTokens >= compressionThreshold &&
+					totalTokens < maxAllowedSize // Only compress if not yet at max, otherwise fall back to truncation
+
+				if (shouldTriggerCompression) {
+					// Try semantic compression first
+					const compressionResult = await this.trySemanticCompression(
+						apiConversationHistory,
+						conversationHistoryDeletedRange,
+						timestamp,
+					)
+
+					if (compressionResult.success && compressionResult.summary) {
+						semanticCompressionApplied = true
+						compressedSummary = compressionResult.summary
+						conversationHistoryDeletedRange = compressionResult.newDeletedRange
+						updatedConversationHistoryDeletedRange = true
+						await this.saveContextHistory(taskDirectory)
+					}
+				}
 
 				// This is the most reliable way to know when we're close to hitting the context window.
-				if (totalTokens >= maxAllowedSize) {
+				// Fall back to standard truncation if semantic compression wasn't applied or didn't help
+				if (!semanticCompressionApplied && totalTokens >= maxAllowedSize) {
 					// Since the user may switch between models with different context windows, truncating half may not be enough (ie if switching from claude 200k to deepseek 64k, half truncation will only remove 100k tokens, but we need to remove much more)
 					// So if totalTokens/2 is greater than maxAllowedSize, we truncate 3/4 instead of 1/2
 					const keep = totalTokens / 2 > maxAllowedSize ? "quarter" : "half"
@@ -184,7 +239,73 @@ export class ContextManager {
 			conversationHistoryDeletedRange: conversationHistoryDeletedRange,
 			updatedConversationHistoryDeletedRange: updatedConversationHistoryDeletedRange,
 			truncatedConversationHistory: truncatedConversationHistory,
+			semanticCompressionApplied: semanticCompressionApplied,
+			compressedSummary: compressedSummary,
 		}
+	}
+
+	/**
+	 * Attempts to apply semantic compression to the conversation history
+	 * Returns the compression result including whether it was successful and the new deleted range
+	 */
+	private async trySemanticCompression(
+		apiMessages: Anthropic.Messages.MessageParam[],
+		currentDeletedRange: [number, number] | undefined,
+		timestamp: number,
+	): Promise<{
+		success: boolean
+		summary?: string
+		newDeletedRange?: [number, number]
+	}> {
+		try {
+			// Calculate the range of messages to compress
+			const startIndex = currentDeletedRange ? currentDeletedRange[1] + 1 : 2 // Start after the first user-assistant pair
+			const preserveCount = this.semanticCompressionService.getPreserveRecentMessages() * 2 // Each pair is 2 messages
+			const endIndex = Math.max(startIndex, apiMessages.length - preserveCount)
+
+			// Need at least some messages to compress
+			if (endIndex <= startIndex) {
+				return { success: false }
+			}
+
+			// Call the semantic compression service
+			const summary = await this.semanticCompressionService.compressConversation(apiMessages, startIndex, endIndex)
+
+			if (!summary) {
+				return { success: false }
+			}
+
+			// Apply the compression notice to the first assistant message
+			this.applySemanticCompressionNoticeChange(timestamp, summary)
+
+			// Calculate the new deleted range
+			const newDeletedRange: [number, number] = [2, endIndex - 1] // Keep first user-assistant pair (indices 0, 1)
+
+			return {
+				success: true,
+				summary: summary,
+				newDeletedRange: newDeletedRange,
+			}
+		} catch (error) {
+			console.error("ContextManager: Semantic compression failed:", error)
+			return { success: false }
+		}
+	}
+
+	/**
+	 * Applies a notice to the first assistant message indicating semantic compression was performed
+	 */
+	private applySemanticCompressionNoticeChange(timestamp: number, summary: string): boolean {
+		// Add a semantic compression notice to the first assistant message (index 1)
+		const compressionNotice = formatResponse.semanticCompressionNotice(summary)
+
+		if (!this.contextHistoryUpdates.has(1)) {
+			const innerMap = new Map<number, ContextUpdate[]>()
+			innerMap.set(0, [[timestamp, "text", [compressionNotice], []]])
+			this.contextHistoryUpdates.set(1, [0, innerMap]) // EditType is undefined for first assistant message
+			return true
+		}
+		return false
 	}
 
 	/**
